@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>LCA — 保存則学習シミュレーション</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #060810; color: #aaa; font-family: monospace; overflow: hidden; }
+canvas { display: block; }
+#info { position: fixed; top: 12px; left: 12px; font-size: 11px; color: #445; line-height: 2; pointer-events: none; }
+#info span { color: #8cf; }
+#info .level { color: #fc8; }
+#info .phase { color: #8fc; }
+#results { position: fixed; top: 12px; right: 12px; font-size: 11px; color: #445; line-height: 2; pointer-events: none; text-align: right; max-width: 220px; }
+#results .ok { color: #8fc; }
+#results .ng { color: #f66; }
+#results .title { color: #fa8; }
+#log { position: fixed; bottom: 12px; left: 12px; font-size: 10px; color: #334; line-height: 1.7; pointer-events: none; }
+#log span { color: #68a; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="info">
+  cycle: <span id="cy">0</span><br>
+  nodes: <span id="nd">1</span><br>
+  level: <span class="level" id="lv">0</span><br>
+  phase: <span class="phase" id="ph">潜在</span><br>
+  難易度: <span id="dif">—</span><br>
+  処理済: <span id="pc">0</span><br>
+  学習精度: <span id="acc">—</span>
+</div>
+<div id="results">
+  <span class="title">— 保存則検証 —</span><br>
+  質量保存: <span id="r_mass">待機中</span><br>
+  エネルギー保存: <span id="r_energy">待機中</span><br>
+  運動量保存: <span id="r_momentum">待機中</span><br>
+  <br>
+  <span class="title">— 学習履歴 —</span><br>
+  Lv1解決: <span id="s1">0</span><br>
+  Lv2解決: <span id="s2">0</span><br>
+  Lv3解決: <span id="s3">0</span><br>
+  Lv4解決: <span id="s4">0</span><br>
+  Lv5解決: <span id="s5">0</span>
+</div>
+<div id="log">最新処理: <span id="latest">—</span></div>
+<script>
+const canvas=document.getElementById('c');
+const ctx=canvas.getContext('2d');
+canvas.width=window.innerWidth; canvas.height=window.innerHeight;
+const W=canvas.width, H=canvas.height;
+let audioCtx=null;
+function initAudio(){audioCtx=new(window.AudioContext||window.webkitAudioContext)();}
+function playRipple(freq=220,intensity=0.2,duration=0.5){
+  if(!audioCtx)return;
+  const buf=audioCtx.createBuffer(1,audioCtx.sampleRate*duration,audioCtx.sampleRate);
+  const data=buf.getChannelData(0);
+  for(let i=0;i<data.length;i++){const t=i/audioCtx.sampleRate;data[i]=(Math.sin(2*Math.PI*freq*t)*Math.exp(-t*6)+Math.sin(2*Math.PI*freq*1.5*t)*Math.exp(-t*10))*intensity*(0.8+Math.random()*0.2)*0.5;}
+  const src=audioCtx.createBufferSource();const gain=audioCtx.createGain();gain.gain.value=0.12;
+  src.buffer=buf;src.connect(gain);gain.connect(audioCtx.destination);src.start();
+}
+const LCA={x:W/2,y:H/2,r:16,pulse:0};
+let nodes=[],edges=[],problems=[],ripples=[];
+let cycle=0,level=0,phase='潜在';
+const maxNodes=Math.floor((W*H)/2000);
+let processedCount=0,solvedByLevel=[0,0,0,0,0];
+let massErrors=[],energyErrors=[],momentumErrors=[];
+let learningAccuracy=0,currentDifficulty=1;
+
+function createProblem(dif){
+  const angle=Math.random()*Math.PI*2;
+  const speed=(1.5+dif*0.8)*(0.8+Math.random()*0.4);
+  const mass_in=1+Math.random()*dif*1.5;
+  const vx_in=Math.cos(angle)*speed, vy_in=Math.sin(angle)*speed;
+  let energy_in;
+  if(dif<=2){energy_in=0.5*mass_in*(vx_in**2+vy_in**2)+mass_in*2;}
+  else if(dif<=3){energy_in=0.5*mass_in*(vx_in**2+vy_in**2)+mass_in*2+mass_in*dif*0.5;}
+  else{energy_in=0.5*mass_in*(vx_in**2+vy_in**2)+mass_in*2+0.1*mass_in**2*dif+Math.sin(angle)*dif;}
+  const secondary=dif>=5?{mass:mass_in*0.5,vx:-vx_in*0.8,vy:-vy_in*0.8}:null;
+  return{x:LCA.x,y:LCA.y,vx:vx_in*2.5,vy:vy_in*2.5,mass_in,vx_in,vy_in,energy_in,
+    momentum_in:{x:mass_in*vx_in,y:mass_in*vy_in},secondary,difficulty:dif,
+    state:'pending',assignedNode:null,timer:0,alpha:0,result:null,
+    processingTime:Math.floor(20+dif*8)};
+}
+
+function processProblems(){
+  if(level<5)return;
+  for(const prob of problems){
+    if(prob.state==='pending'&&nodes.length>0){
+      prob.x+=prob.vx; prob.y+=prob.vy; prob.vx*=0.96; prob.vy*=0.96;
+      let nearest=null,nearestD=Infinity;
+      for(const n of nodes){const d=Math.hypot(n.x-prob.x,n.y-prob.y);if(d<nearestD){nearestD=d;nearest=n;}}
+      if(nearest&&nearestD<120){prob.state='processing';prob.assignedNode=nearest;prob.timer=0;}
+      if(prob.x<0||prob.x>W||prob.y<0||prob.y>H){prob.state='resolved';prob.timer=prob.processingTime+1;}
+    }
+    if(prob.state==='processing'){
+      prob.timer++;
+      if(prob.timer>=prob.processingTime){
+        const lf=Math.max(0.001,0.05-learningAccuracy*0.048);
+        const noiseE=(Math.random()-0.5)*lf*2, noiseP=(Math.random()-0.5)*lf*2;
+        const mass_out=prob.mass_in;
+        const energy_out=prob.energy_in*(1+noiseE);
+        const momentum_out={x:prob.momentum_in.x*(1+noiseP),y:prob.momentum_in.y*(1+noiseP)};
+        const massError=0;
+        const energyError=Math.abs(energy_out-prob.energy_in)/Math.abs(prob.energy_in);
+        const pMi=Math.hypot(prob.momentum_in.x,prob.momentum_in.y);
+        const pMo=Math.hypot(momentum_out.x,momentum_out.y);
+        const momentumError=pMi>0.001?Math.abs(pMo-pMi)/pMi:0;
+        prob.result={mass_out,energy_out,momentum_out,massError,energyError,momentumError};
+        prob.state='resolved';
+        massErrors.push(massError); energyErrors.push(energyError); momentumErrors.push(momentumError);
+        processedCount++; solvedByLevel[prob.difficulty-1]++;
+        learningAccuracy=Math.min(1,learningAccuracy+0.002*prob.difficulty);
+        if(solvedByLevel[currentDifficulty-1]>=5&&currentDifficulty<5){
+          currentDifficulty++;
+          playRipple(500+currentDifficulty*50,0.3,0.6);
+        }
+        addRipple(prob.x,prob.y,5);
+        if(Math.random()<0.5)playRipple(300+prob.difficulty*60,0.15,0.3);
+        document.getElementById('latest').textContent=`Lv${prob.difficulty} 完了 E誤差:${(energyError*100).toFixed(2)}%`;
+      }
+    }
+  }
+  for(let i=problems.length-1;i>=0;i--){
+    if(problems[i].state==='resolved'){problems[i].timer++;if(problems[i].timer>70)problems.splice(i,1);}
+  }
+}
+
+function addNode(){
+  const angle=Math.random()*Math.PI*2;
+  const nearest=findNearest()||LCA;
+  const dist=25+Math.random()*(level<5?80:50);
+  const rn=Math.sin(cycle*0.4)*0.3+Math.sin(cycle*0.9)*0.2;
+  const node={x:Math.max(30,Math.min(W-30,nearest.x+Math.cos(angle+rn*0.3)*dist)),
+    y:Math.max(30,Math.min(H-30,nearest.y+Math.sin(angle+rn*0.3)*dist)),
+    r:level<5?4+Math.random()*3:3+Math.random()*2,age:0,alpha:0,level,strength:1.0};
+  nodes.push(node); edges.push({from:nearest,to:node,alpha:0,level}); addRipple(node.x,node.y,level);
+}
+function findNearest(){
+  if(nodes.length===0)return null;
+  const range=level<5?W*0.4:W*0.18;
+  const cx=W/2+(Math.random()-0.5)*W*0.3, cy=H/2+(Math.random()-0.5)*H*0.3;
+  let best=null,bestD=Infinity;
+  for(const n of [...nodes,LCA]){const d=Math.hypot(n.x-cx,n.y-cy);if(d<range&&d<bestD){bestD=d;best=n;}}
+  return best;
+}
+function addRipple(x,y,lv){ripples.push({x,y,r:0,alpha:0.5,color:lv<5?'80,160,255':'120,220,160'});}
+
+let nextGrowth=0;
+function updateGrowth(){
+  cycle++;
+  if(cycle===30){level=5;phase='Level 5移行';playRipple(330,0.35,0.8);setTimeout(()=>playRipple(440,0.25,0.6),400);}
+  const rn=Math.sin(cycle*0.3)*0.4+Math.sin(cycle*0.7)*0.3;
+  const interval=level<5?18:7, burst=level<5?1:Math.floor(3+rn*1.5);
+  if(cycle>=nextGrowth&&nodes.length<maxNodes){
+    for(let i=0;i<Math.max(1,burst);i++){if(nodes.length<maxNodes)addNode();}
+    nextGrowth=cycle+Math.max(2,Math.floor(interval*(0.8+rn*0.3)));
+  }
+  const pInterval=Math.max(8,18-currentDifficulty*2);
+  if(level===5&&cycle%pInterval===0&&problems.length<25)problems.push(createProblem(currentDifficulty));
+  processProblems();
+  if(level<5){phase=cycle<15?'潜在':'増殖';}
+  else{const d=nodes.length/maxNodes;phase=d<0.35?'統制増殖':d<0.75?'動的平衡':'胎児5か月';}
+}
+
+function draw(){
+  ctx.fillStyle=level<5?'rgba(6,8,16,0.18)':'rgba(5,8,6,0.16)';
+  ctx.fillRect(0,0,W,H);
+  for(let i=ripples.length-1;i>=0;i--){
+    const rp=ripples[i];rp.r+=1.1;rp.alpha-=0.011;
+    if(rp.alpha<=0){ripples.splice(i,1);continue;}
+    ctx.beginPath();ctx.arc(rp.x,rp.y,rp.r,0,Math.PI*2);
+    ctx.strokeStyle=`rgba(${rp.color},${rp.alpha})`;ctx.lineWidth=0.7;ctx.stroke();
+  }
+  for(const e of edges){
+    e.alpha=Math.min(1,e.alpha+0.025);
+    ctx.beginPath();ctx.moveTo(e.from.x,e.from.y);ctx.lineTo(e.to.x,e.to.y);
+    ctx.strokeStyle=`rgba(${e.level<5?'60,100,180':'60,160,100'},${e.alpha*0.25})`;ctx.lineWidth=0.5;ctx.stroke();
+  }
+  for(const n of nodes){
+    n.age++;n.alpha=Math.min(1,n.alpha+0.035);
+    ctx.beginPath();ctx.arc(n.x,n.y,n.r,0,Math.PI*2);
+    ctx.fillStyle=`rgba(${n.level<5?'80,140,220':'100,200,140'},${n.alpha*0.65})`;ctx.fill();
+  }
+  const colors=['255,255,255','255,230,80','255,160,60','255,80,80','200,80,255'];
+  for(const prob of problems){
+    prob.alpha=Math.min(1,prob.alpha+0.06);
+    const col=colors[prob.difficulty-1];
+    if(prob.state==='pending'){
+      ctx.beginPath();ctx.arc(prob.x,prob.y,4+prob.difficulty,0,Math.PI*2);
+      ctx.fillStyle=`rgba(${col},${prob.alpha*0.8})`;ctx.fill();
+      ctx.beginPath();ctx.moveTo(LCA.x,LCA.y);ctx.lineTo(prob.x,prob.y);
+      ctx.strokeStyle=`rgba(${col},${prob.alpha*0.15})`;ctx.lineWidth=0.5;ctx.stroke();
+      ctx.fillStyle=`rgba(${col},${prob.alpha})`;ctx.font=`${8+prob.difficulty}px monospace`;
+      ctx.textAlign='center';ctx.textBaseline='middle';ctx.fillText('?',prob.x,prob.y);
+    }
+    if(prob.state==='processing'&&prob.assignedNode){
+      const progress=prob.timer/prob.processingTime;
+      ctx.beginPath();ctx.moveTo(prob.x,prob.y);ctx.lineTo(prob.assignedNode.x,prob.assignedNode.y);
+      ctx.strokeStyle=`rgba(${col},${0.5*prob.alpha*progress})`;ctx.lineWidth=1.2;ctx.stroke();
+      ctx.beginPath();ctx.arc(prob.x,prob.y,6+prob.difficulty,0,Math.PI*2*progress);
+      ctx.strokeStyle=`rgba(${col},${prob.alpha*0.8})`;ctx.lineWidth=1.5;ctx.stroke();
+      ctx.fillStyle=`rgba(${col},${prob.alpha})`;ctx.font='9px monospace';
+      ctx.textAlign='center';ctx.textBaseline='middle';ctx.fillText('…',prob.x,prob.y);
+    }
+    if(prob.state==='resolved'&&prob.result){
+      const ok=prob.result.energyError<0.03&&prob.result.momentumError<0.03;
+      ctx.beginPath();ctx.arc(prob.x,prob.y,8+prob.difficulty*0.5,0,Math.PI*2);
+      ctx.fillStyle=ok?`rgba(80,220,120,${prob.alpha*0.8})`:`rgba(220,120,80,${prob.alpha*0.8})`;ctx.fill();
+      ctx.fillStyle='white';ctx.font='10px monospace';ctx.textAlign='center';ctx.textBaseline='middle';
+      ctx.fillText(ok?'✓':'△',prob.x,prob.y);
+      prob.alpha=Math.max(0,prob.alpha-0.015);
+    }
+  }
+  LCA.pulse=(LCA.pulse+0.035)%(Math.PI*2);
+  const pr=LCA.r+Math.sin(LCA.pulse)*3;
+  ctx.beginPath();ctx.arc(LCA.x,LCA.y,pr+10,0,Math.PI*2);
+  ctx.strokeStyle=`rgba(${level<5?'180,210,255':'180,255,200'},${0.12+Math.sin(LCA.pulse)*0.04})`;ctx.lineWidth=1;ctx.stroke();
+  ctx.beginPath();ctx.arc(LCA.x,LCA.y,pr,0,Math.PI*2);
+  const grad=ctx.createRadialGradient(LCA.x,LCA.y,0,LCA.x,LCA.y,pr);
+  grad.addColorStop(0,level<5?'rgba(220,240,255,0.95)':'rgba(220,255,230,0.95)');
+  grad.addColorStop(1,level<5?'rgba(80,160,255,0.6)':'rgba(80,200,120,0.6)');
+  ctx.fillStyle=grad;ctx.fill();
+  ctx.fillStyle='#050510';ctx.font='bold 9px monospace';ctx.textAlign='center';ctx.textBaseline='middle';ctx.fillText('S₀',LCA.x,LCA.y);
+  document.getElementById('cy').textContent=cycle;
+  document.getElementById('nd').textContent=nodes.length;
+  document.getElementById('lv').textContent=level;
+  document.getElementById('ph').textContent=phase;
+  document.getElementById('dif').textContent=level<5?'—':`Lv${currentDifficulty}`;
+  document.getElementById('pc').textContent=processedCount;
+  document.getElementById('acc').textContent=level<5?'—':`${(learningAccuracy*100).toFixed(1)}%`;
+  if(massErrors.length>0){
+    const avgE=energyErrors.reduce((a,b)=>a+b,0)/energyErrors.length;
+    const avgP=momentumErrors.reduce((a,b)=>a+b,0)/momentumErrors.length;
+    const setR=(id,val,th)=>{const el=document.getElementById(id);el.textContent=val<th?`保存OK (${(val*100).toFixed(2)}%)`:`誤差 (${(val*100).toFixed(2)}%)`;el.className=val<th?'ok':'ng';};
+    document.getElementById('r_mass').textContent='保存OK (0.00%)';document.getElementById('r_mass').className='ok';
+    setR('r_energy',avgE,0.05);setR('r_momentum',avgP,0.05);
+    for(let i=0;i<5;i++)document.getElementById(`s${i+1}`).textContent=solvedByLevel[i];
+  }
+}
+function loop(){updateGrowth();draw();requestAnimationFrame(loop);}
+canvas.addEventListener('click',()=>{if(!audioCtx){initAudio();playRipple(220,0.3,0.6);}});
+window.addEventListener('resize',()=>{canvas.width=window.innerWidth;canvas.height=window.innerHeight;});
+loop();
+</script>
+</body>
+</html>
